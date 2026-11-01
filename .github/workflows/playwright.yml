@@ -2,12 +2,12 @@ name: Playwright Tests
 
 on:
   push:
-    branches: [ '**' ]          # run on every branch
+    branches: [ '**', '!gh-pages' ]   # every branch except the one holding published reports
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:            # allow manual runs from the Actions tab
 
-# Only read access to the repo is needed
+# Only read access to the repo is needed (the report job asks for more on its own)
 permissions:
   contents: read
 
@@ -63,16 +63,17 @@ jobs:
       - name: Run API tests
         run: npx playwright test --project=api
         env:
+          REPORT_NAME: api
           ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
 
-      - name: Upload API test report
-        uses: actions/upload-artifact@v5
+      - name: Upload raw results
+        uses: actions/upload-artifact@v6
         if: ${{ !cancelled() }}
         with:
-          name: api-test-report
-          path: playwright-report/
-          retention-days: 30
+          name: blob-report-api
+          path: blob-report/
+          retention-days: 7
 
   # Stage 2b: UI tests in Chromium (runs in parallel with API tests)
   ui-tests:
@@ -99,15 +100,87 @@ jobs:
       - name: Run UI tests
         run: npx playwright test --project=chromium
         env:
+          REPORT_NAME: ui
           ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
 
-      - name: Upload UI test report
-        uses: actions/upload-artifact@v5
+      - name: Upload raw results
+        uses: actions/upload-artifact@v6
         if: ${{ !cancelled() }}
         with:
-          name: ui-test-report
-          path: |
-            playwright-report/
-            test-results/
+          name: blob-report-ui
+          path: blob-report/
+          retention-days: 7
+
+  # Stage 3: merge results into one HTML report, publish it to GitHub Pages,
+  # and put a pass/fail summary with the report link on the run page.
+  report:
+    name: Test report
+    needs: [ api-tests, ui-tests ]
+    if: ${{ !cancelled() }}     # publish the report even when tests fail
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write           # to push the report to the gh-pages branch
+    env:
+      REPORT_DIR: reports/${{ github.run_number }}
+      REPORT_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/reports/${{ github.run_number }}/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download raw results from test jobs
+        uses: actions/download-artifact@v6
+        with:
+          pattern: blob-report-*
+          path: all-blob-reports
+          merge-multiple: true
+
+      - name: Build HTML report
+        run: npx playwright merge-reports --reporter html ./all-blob-reports
+
+      - name: Build pass/fail summary
+        run: |
+          npx playwright merge-reports --reporter json ./all-blob-reports > results.json
+          node -e '
+            const { stats } = require("./results.json");
+            const lines = [
+              "## Playwright test report",
+              "",
+              "| ✅ Passed | ❌ Failed | ⚠️ Flaky | ⏭️ Skipped | ⏱️ Duration |",
+              "|---|---|---|---|---|",
+              `| ${stats.expected} | ${stats.unexpected} | ${stats.flaky} | ${stats.skipped} | ${(stats.duration / 1000).toFixed(0)}s |`,
+              "",
+              `### 👉 [Open the HTML report](${process.env.REPORT_URL})`,
+              "",
+              "_The link can take a minute to work while GitHub Pages updates._",
+            ];
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+
+      - name: Publish report to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./playwright-report
+          destination_dir: ${{ env.REPORT_DIR }}
+          keep_files: true      # keep reports from earlier runs, like Jenkins build history
+
+      - name: Show report link
+        run: echo "HTML report → $REPORT_URL"
+
+      - name: Upload HTML report (backup download)
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-html-report
+          path: playwright-report/
           retention-days: 30

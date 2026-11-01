@@ -16,10 +16,18 @@ export default defineConfig({
   timeout: 30_000,           // max time for one test
   expect: { timeout: 5_000 },
 
-  reporter: [
-    ['list'],                                   // readable progress in the terminal
-    ['html', { open: 'never' }],                // full report: npx playwright show-report
-  ],
+  reporter: isCI
+    ? [
+        ['list'],                                 // readable progress in the CI log
+        ['github'],                               // failures shown as annotations on the run page
+        // Raw results; the CI "Test report" job merges these from all jobs into one HTML report.
+        // REPORT_NAME (set per CI job) keeps the file names unique.
+        ['blob', { fileName: `report-${process.env.REPORT_NAME ?? 'tests'}.zip` }],
+      ]
+    : [
+        ['list'],                                 // readable progress in the terminal
+        ['html', { open: 'never' }],              // full report: npx playwright show-report
+      ],
 
   use: {
     baseURL: process.env.BASE_URL ?? 'https://automationintesting.online',
